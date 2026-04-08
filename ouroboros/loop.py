@@ -39,7 +39,8 @@ _MODEL_PRICING_STATIC = {
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
     "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
-    "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
+    "google/gemini-3.1-pro-preview": (2.0, 0.20, 12.0),
+    "google/gemini-2.5-flash": (0.3, 0.03, 2.5),
     "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
 }
@@ -701,35 +702,36 @@ def run_llm_loop(
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
                 fallback_list_raw = os.environ.get(
                     "OUROBOROS_MODEL_FALLBACK_LIST",
-                    "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
+                    "openai/o3,anthropic/claude-sonnet-4.6,google/gemini-2.5-pro-preview"
                 )
-                fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
-                fallback_model = None
-                for candidate in fallback_candidates:
-                    if candidate != active_model:
-                        fallback_model = candidate
-                        break
-                if fallback_model is None:
+                fallback_candidates = [
+                    m.strip() for m in fallback_list_raw.split(",")
+                    if m.strip() and m.strip() != active_model
+                ]
+                if not fallback_candidates:
                     return (
                         f"⚠️ Failed to get a response from model {active_model} after {max_retries} attempts. "
                         f"All fallback models match the active one. Try rephrasing your request."
                     ), accumulated_usage, llm_trace
 
-                # Emit progress message so user sees fallback happening
-                fallback_progress = f"⚡ Fallback: {active_model} → {fallback_model} after empty response"
-                emit_progress(fallback_progress)
+                # Iterate through ALL candidates until one succeeds
+                msg = None
+                last_tried = active_model
+                for fallback_model in fallback_candidates:
+                    emit_progress(f"⚡ Fallback: {last_tried} → {fallback_model} (empty/error response)")
+                    msg, _ = _call_llm_with_retry(
+                        llm, messages, fallback_model, tool_schemas, active_effort,
+                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                    )
+                    if msg is not None:
+                        break
+                    last_tried = fallback_model
 
-                # Try fallback model (don't increment round_idx — this is still same logical round)
-                msg, fallback_cost = _call_llm_with_retry(
-                    llm, messages, fallback_model, tool_schemas, active_effort,
-                    max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
-                )
-
-                # If fallback also fails, give up
                 if msg is None:
+                    tried = ", ".join([active_model] + fallback_candidates)
                     return (
-                        f"⚠️ Failed to get a response from the model after {max_retries} attempts. "
-                        f"Fallback model ({fallback_model}) also returned no response."
+                        f"⚠️ Failed to get a response after {max_retries} attempts each. "
+                        f"Tried models: {tried}"
                     ), accumulated_usage, llm_trace
 
                 # Fallback succeeded — continue processing with this msg
